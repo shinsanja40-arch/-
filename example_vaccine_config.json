@@ -1,0 +1,28 @@
+{
+  "proven_fact": "Vaccines have saved millions of lives by training the immune system to recognize and fight specific pathogens.",
+  "topic": "How Vaccines Work and Their Historical Impact",
+  "evidence_stages": [
+    [
+      "Edward Jenner's cowpox experiment (1796) protected against smallpox",
+      "Smallpox killed 300 million people in the 20th century alone",
+      "Observable: Vaccinated individuals showed resistance to disease outbreaks"
+    ],
+    [
+      "Louis Pasteur developed rabies vaccine (1885) based on weakened virus principle",
+      "Polio incidence dropped 99% after vaccine introduction (1955)",
+      "Measles cases decreased from 3-4 million/year to near elimination in vaccinated populations"
+    ],
+    [
+      "Clinical trials demonstrate 90-95% efficacy for most modern vaccines",
+      "Herd immunity threshold calculations match epidemiological models",
+      "Antibody titers measurably increase post-vaccination",
+      "Historical data: Diseases eliminated in regions with high vaccination rates"
+    ],
+    [
+      "mRNA vaccine technology (COVID-19) demonstrated rapid development capability",
+      "Genetic sequencing confirms vaccine-induced antibodies match target pathogens",
+      "Global vaccination campaigns eradicated smallpox (1980) and nearly eliminated polio",
+      "Real-time surveillance data shows correlation between vaccination rates and disease reduction"
+    ]
+  ]
+}
