@@ -1,323 +1,455 @@
 """
 Analysis and Visualization for Proven Fact-Based Algorithm Results
-Generates tables and plots matching the paper's format
+Generates tables and plots for examining data quality and system performance
+
+LICENSE:
+BY-NC (Personal use allowed. Commercial use prohibited. Attribution required.)
+Copyright (c) 2026 [Cheongwon Choi]
+
+Version: 1.4.0-ABSOLUTE-FINAL
+Date: 2026-02-03
+
+Changes from v1.1.0:
+  BUG-C : generate_referee_analysis() – v1.1.0 실제 주기로 수정 (5n/5n-3, 7n/7n-3/7n-5)
+  NEW   : redundancy 분석 섹션 추가
+  NEW   : confirmed_logic 통계 표시
 """
 
 import json
-import pandas as pd
-import matplotlib.pyplot as plt
-import seaborn as sns
+import sys
 from pathlib import Path
 from typing import Dict, List
+import argparse
+
+try:
+    import pandas as pd
+    _PANDAS = True
+except ImportError:
+    _PANDAS = False
+
+try:
+    import matplotlib
+    matplotlib.use('Agg')          # headless safe
+    import matplotlib.pyplot as plt
+    import seaborn as sns          # noqa: F401
+    _MATPLOTLIB = True
+except ImportError:
+    _MATPLOTLIB = False
 
 
+# ---------------------------------------------------------------------------
+# Core Analyzer
+# ---------------------------------------------------------------------------
 class ProvenFactAnalyzer:
-    """Analyze and visualize proven fact simulation results"""
-    
+    """Analyze and visualize proven fact simulation results."""
+
     def __init__(self, results_file: str):
-        """Load results from JSON file"""
-        with open(results_file, 'r', encoding='utf-8') as f:
-            self.data = json.load(f)
-        
-        self.sessions = self.data['sessions']
-        self.metrics = self.data['metrics']
+        try:
+            with open(results_file, 'r', encoding='utf-8') as f:
+                self.data = json.load(f)
+        except json.JSONDecodeError as e:
+            print(f"  ❌ Failed to parse JSON in '{results_file}': {e}")
+            print(f"      The file may be corrupted or incomplete.")
+            raise SystemExit(1)
+        except FileNotFoundError:
+            print(f"  ❌ Results file not found: {results_file}")
+            raise SystemExit(1)
+
+        self.metadata = self.data.get('metadata', {})
+        self.all_records = self.data.get('all_records', [])
+        self.hallucinations = self.data.get('hallucinations', [])
+        self.hallucination_summary = self.data.get('hallucination_summary', {})
         self.final_audit = self.data.get('final_audit', {})
-        
-    def generate_session_table(self) -> pd.DataFrame:
-        """Generate table similar to paper's format"""
-        table_data = []
-        
-        for session in self.sessions:
-            session_num = session['session_number']
-            
-            # Count sentences
-            total_sentences = 0
-            for q in session.get('student_questions', []):
-                total_sentences += len([s for s in q.split('.') if s.strip()])
-            for exp in session.get('professor_explanations', []):
-                total_sentences += len([s for s in exp.split('.') if s.strip()])
-            
-            hallucinations = session.get('hallucinations_detected', 0)
-            hall_rate = session.get('hallucination_rate', 0)
-            
-            table_data.append({
-                'Round': session_num,
-                'Total Sentences': total_sentences,
-                'Hallucination Sentences': hallucinations,
-                'Hallucination Rate (%)': f"{hall_rate * 100:.2f}%"
+        self.confirmed_logic = self.data.get('confirmed_logic', [])
+
+    # ------------------------------------------------------------------
+    def generate_session_table(self) -> List[Dict]:
+        """Generate session-by-session performance data."""
+        # 세션별로 기록 그룹화
+        sessions: Dict[int, list] = {}
+        for record in self.all_records:
+            sessions.setdefault(record['session'], []).append(record)
+
+        # 세션별 hallucination 카운트 (session 필드 기반)
+        hall_per_session: Dict[int, int] = {}
+        for h in self.hallucinations:
+            s = h.get('session', -1)
+            hall_per_session[s] = hall_per_session.get(s, 0) + 1
+
+        table = []
+        for sn in sorted(sessions.keys()):
+            records = sessions[sn]
+            total_tokens = sum(r.get('estimated_tokens', 0) for r in records)
+            hall_count = hall_per_session.get(sn, 0)
+
+            # redundancy 체크
+            redundant = sum(1 for r in records
+                            if r.get('redundancy_assessment', {}).get('status') == 'redundant')
+
+            table.append({
+                'Session': sn,
+                'Exchanges': len(records),
+                'Est. Tokens': total_tokens,
+                'Hallucinations': hall_count,
+                'Redundant': redundant,
+                'Status': '✓ Clean' if hall_count == 0 else f'⚠ {hall_count} issues'
             })
-        
-        df = pd.DataFrame(table_data)
-        return df
-    
+        return table
+
+    # ------------------------------------------------------------------
     def generate_summary_statistics(self) -> Dict:
-        """Generate comprehensive summary"""
-        hallucination_rates = [s.get('hallucination_rate', 0) for s in self.sessions]
-        
-        return {
-            'Total Sessions': self.metrics['total_sessions'],
-            'Total Sentences': self.metrics['total_sentences'],
-            'Total Hallucinations': self.metrics['total_hallucinations'],
-            'Final Hallucination Rate': f"{self.metrics['final_hallucination_rate']:.4%}",
-            'Data Quality': self.final_audit.get('data_quality', 'N/A'),
-            'Mean Session Hallucination Rate': f"{sum(hallucination_rates)/len(hallucination_rates):.4%}" if hallucination_rates else "0.00%",
-            'Max Session Hallucination Rate': f"{max(hallucination_rates):.4%}" if hallucination_rates else "0.00%",
-            'Sessions with 0% Hallucinations': sum(1 for r in hallucination_rates if r == 0),
-            'Referee Resets': self.metrics['referee_resets'],
-            'Execution Time': f"{self.metrics['execution_time']:.2f}s"
-        }
-    
-    def analyze_evidence_stages(self) -> pd.DataFrame:
-        """Analyze performance by evidence stage"""
-        stage_data = {}
-        
-        for session in self.sessions:
-            stage = session.get('stage', 1)
-            if stage not in stage_data:
-                stage_data[stage] = {
-                    'sessions': 0,
-                    'total_hallucinations': 0,
-                    'total_sentences': 0
-                }
-            
-            stage_data[stage]['sessions'] += 1
-            stage_data[stage]['total_hallucinations'] += session.get('hallucinations_detected', 0)
-            
-            # Count sentences
-            sentences = 0
-            for q in session.get('student_questions', []):
-                sentences += len([s for s in q.split('.') if s.strip()])
-            for exp in session.get('professor_explanations', []):
-                sentences += len([s for s in exp.split('.') if s.strip()])
-            stage_data[stage]['total_sentences'] += sentences
-        
-        # Create DataFrame
-        rows = []
-        for stage, data in sorted(stage_data.items()):
-            hall_rate = data['total_hallucinations'] / data['total_sentences'] if data['total_sentences'] > 0 else 0
-            rows.append({
-                'Stage': stage,
-                'Sessions': data['sessions'],
-                'Evidence Items': len(self.sessions[0].get('available_evidence', [])),  # Approximate
-                'Total Sentences': data['total_sentences'],
-                'Hallucinations': data['total_hallucinations'],
-                'Hallucination Rate': f"{hall_rate:.4%}"
-            })
-        
-        return pd.DataFrame(rows)
-    
-    def plot_hallucination_trend(self, save_path: str = 'hallucination_trend.png'):
-        """Plot hallucination rate across sessions"""
-        sessions = [s['session_number'] for s in self.sessions]
-        rates = [s.get('hallucination_rate', 0) * 100 for s in self.sessions]
-        
-        plt.figure(figsize=(12, 6))
-        plt.plot(sessions, rates, marker='o', linewidth=2, markersize=8, color='steelblue')
-        plt.axhline(y=1.0, color='r', linestyle='--', linewidth=1.5, label='1% threshold', alpha=0.7)
-        plt.axhline(y=0.0, color='g', linestyle='--', linewidth=1.5, label='0% (ideal)', alpha=0.7)
-        plt.xlabel('Session Number', fontsize=13, fontweight='bold')
-        plt.ylabel('Hallucination Rate (%)', fontsize=13, fontweight='bold')
-        plt.title('Hallucination Rate Across Learning Sessions', fontsize=15, fontweight='bold')
-        plt.grid(True, alpha=0.3, linestyle=':')
-        plt.legend(fontsize=11)
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Trend plot saved to: {save_path}")
-        plt.close()
-    
-    def plot_stage_comparison(self, save_path: str = 'stage_comparison.png'):
-        """Compare hallucination rates by evidence stage"""
-        df = self.analyze_evidence_stages()
-        
-        if len(df) == 0:
-            print("No stage data available")
-            return
-        
-        # Extract numeric hallucination rates
-        stages = df['Stage'].tolist()
-        rates = [float(r.strip('%')) for r in df['Hallucination Rate'].tolist()]
-        
-        plt.figure(figsize=(10, 6))
-        bars = plt.bar(stages, rates, color='teal', alpha=0.7, edgecolor='black', linewidth=1.5)
-        
-        # Add value labels on bars
-        for i, (stage, rate) in enumerate(zip(stages, rates)):
-            plt.text(stage, rate + 0.1, f'{rate:.2f}%', ha='center', fontsize=10, fontweight='bold')
-        
-        plt.xlabel('Evidence Stage', fontsize=13, fontweight='bold')
-        plt.ylabel('Hallucination Rate (%)', fontsize=13, fontweight='bold')
-        plt.title('Hallucination Rate by Evidence Stage', fontsize=15, fontweight='bold')
-        plt.grid(True, axis='y', alpha=0.3, linestyle=':')
-        plt.tight_layout()
-        plt.savefig(save_path, dpi=300, bbox_inches='tight')
-        print(f"Stage comparison saved to: {save_path}")
-        plt.close()
-    
-    def extract_reasoning_paths(self) -> List[Dict]:
-        """Extract A-B-C reasoning paths from transcript"""
-        reasoning_paths = []
-        
-        for session in self.sessions:
-            session_num = session['session_number']
-            
-            for i, explanation in enumerate(session.get('professor_explanations', [])):
-                # Look for causal patterns
-                if 'because' in explanation.lower() or 'therefore' in explanation.lower():
-                    reasoning_paths.append({
-                        'session': session_num,
-                        'professor': i,
-                        'explanation': explanation[:200] + "..." if len(explanation) > 200 else explanation,
-                        'pattern': 'A is B because C'
-                    })
-        
-        return reasoning_paths
-    
-    def analyze_residual_hallucinations(self) -> pd.DataFrame:
-        """Analyze residual hallucinations from final audit"""
-        residual = self.final_audit.get('residual_hallucinations', [])
-        
-        if not residual:
-            return pd.DataFrame({
-                'Type': ['None'],
-                'Count': [0],
-                'Severity': ['N/A']
-            })
-        
-        # Categorize by type
-        type_counts = {}
-        for hall in residual:
-            h_type = hall.get('type', 'unknown')
-            severity = hall.get('severity', 'unknown')
-            
-            key = f"{h_type} ({severity})"
-            type_counts[key] = type_counts.get(key, 0) + 1
-        
-        df = pd.DataFrame([
-            {'Type': k, 'Count': v}
-            for k, v in sorted(type_counts.items(), key=lambda x: x[1], reverse=True)
-        ])
-        
-        return df
-    
-    def generate_latex_table(self, output_file: str = 'results_table.tex'):
-        """Generate LaTeX table for paper"""
-        df = self.generate_session_table()
-        
-        latex_str = df.to_latex(
-            index=False,
-            column_format='cccc',
-            caption='Session-by-Session Hallucination Analysis',
-            label='tab:sessions',
-            escape=False
+        total_sessions = self.metadata.get('total_sessions', 0)
+        total_exchanges = len(self.all_records)
+
+        # redundancy 통계
+        redundant_count = sum(
+            1 for r in self.all_records
+            if r.get('redundancy_assessment', {}).get('status') == 'redundant'
         )
-        
-        with open(output_file, 'w') as f:
-            f.write(latex_str)
-        
-        print(f"LaTeX table saved to: {output_file}")
-    
-    def generate_full_report(self, output_dir: str = './analysis_output'):
-        """Generate comprehensive analysis report"""
-        Path(output_dir).mkdir(exist_ok=True)
-        
-        print("\n" + "="*70)
-        print("ANALYSIS REPORT")
-        print("="*70)
-        
-        # Summary statistics
-        summary = self.generate_summary_statistics()
-        print("\nSUMMARY STATISTICS:")
+        redundancy_rate = redundant_count / max(1, total_exchanges)
+
+        return {
+            'Topic': self.metadata.get('topic', 'N/A'),
+            'Version': self.metadata.get('version', 'N/A'),
+            'Total Sessions': total_sessions,
+            'Total Exchanges': total_exchanges,
+            'Number of Referees': self.metadata.get('num_referees', 2),
+            'Total Hallucinations': self.hallucination_summary.get('total', 0),
+            'Hallucination Rate': f"{self.hallucination_summary.get('rate', 0):.2%}",
+            'Critical Issues': self.hallucination_summary.get('by_severity', {}).get('critical', 0),
+            'High Issues': self.hallucination_summary.get('by_severity', {}).get('high', 0),
+            'Medium Issues': self.hallucination_summary.get('by_severity', {}).get('medium', 0),
+            'Low Issues': self.hallucination_summary.get('by_severity', {}).get('low', 0),
+            'Confirmed Logic Nodes': len(self.confirmed_logic),
+            'Redundant Exchanges': f"{redundant_count} ({redundancy_rate:.1%})",
+            'API Provider': self.metadata.get('api_provider', 'N/A'),
+            'Timestamp': self.metadata.get('timestamp', 'N/A'),
+        }
+
+    # ------------------------------------------------------------------
+    def analyze_hallucinations_by_severity(self) -> List[Dict]:
+        sev = self.hallucination_summary.get('by_severity', {})
+        return [
+            {'Severity': 'Critical', 'Count': sev.get('critical', 0)},
+            {'Severity': 'High',     'Count': sev.get('high', 0)},
+            {'Severity': 'Medium',   'Count': sev.get('medium', 0)},
+            {'Severity': 'Low',      'Count': sev.get('low', 0)},
+        ]
+
+    # ------------------------------------------------------------------
+    # BUG-C 수정 : v1.1.0 실제 주기 반영
+    def generate_referee_analysis(self) -> Dict:
+        num_referees = self.metadata.get('num_referees', 2)
+        total_sessions = self.metadata.get('total_sessions', 0)
+
+        if num_referees == 2:
+            # 5n : 리셋 횟수 = total_sessions // 5
+            # 5n-3 : 리셋 횟수 = (total_sessions + 3) // 5  (근사)
+            reset_counts = [
+                total_sessions // 5,
+                (total_sessions + 3) // 5
+            ]
+            schedule_labels = ["5n (5,10,15…)", "5n-3 (2,7,12…)"]
+        else:  # 3 referees
+            reset_counts = [
+                total_sessions // 7,
+                (total_sessions + 3) // 7,
+                (total_sessions + 5) // 7
+            ]
+            schedule_labels = ["7n (7,14,21…)", "7n-3 (4,11,18…)", "7n-5 (2,9,16…)"]
+
+        # hallucination type별 분류
+        type_counts: Dict[str, int] = {}
+        for h in self.hallucinations:
+            t = h.get('type', 'unknown')
+            type_counts[t] = type_counts.get(t, 0) + 1
+
+        return {
+            'Number of Referees': num_referees,
+            'Reset Schedules': schedule_labels,
+            'Estimated Resets per Referee': reset_counts,
+            'Total Hallucinations Detected': self.hallucination_summary.get('total', 0),
+            'Hallucination Types': type_counts,
+            'Confirmed Logic Nodes': len(self.confirmed_logic),
+        }
+
+    # ------------------------------------------------------------------
+    # NEW : Redundancy 분석
+    def analyze_redundancy(self) -> Dict:
+        total = len(self.all_records)
+        redundant = sum(
+            1 for r in self.all_records
+            if r.get('redundancy_assessment', {}).get('status') == 'redundant'
+        )
+        progressive = total - redundant
+        # 토큰 절약 추정 (redundant 교환당 평균 2000 토큰)
+        avg_tokens = 2000
+        token_savings = redundant * avg_tokens
+        # 비용 추정 ($0.00001 / token – 대략)
+        cost_savings = token_savings * 0.00001
+
+        return {
+            'Total Exchanges': total,
+            'Progressive (유효)': progressive,
+            'Redundant (중복)': redundant,
+            'Redundancy Rate': f"{redundant / max(1, total):.1%}",
+            'Estimated Token Savings': token_savings,
+            'Estimated Cost Savings': f"${cost_savings:.3f}",
+        }
+
+    # ------------------------------------------------------------------
+    # Plots
+    def plot_severity_distribution(self, output_file: str = None):
+        if not _MATPLOTLIB:
+            print("  ⚠️  matplotlib not installed – skipping plot.")
+            return
+
+        data = self.analyze_hallucinations_by_severity()
+        labels = [d['Severity'] for d in data]
+        counts = [d['Count'] for d in data]
+
+        colors = {'Critical': '#d62728', 'High': '#ff7f0e',
+                  'Medium': '#ffbb78', 'Low': '#aec7e8'}
+
+        fig, ax = plt.subplots(figsize=(10, 6))
+        bars = ax.bar(labels, counts,
+                      color=[colors[l] for l in labels], alpha=0.8)
+        ax.set_xlabel('Severity Level', fontsize=12)
+        ax.set_ylabel('Count', fontsize=12)
+        ax.set_title('Hallucination Distribution by Severity', fontsize=14, fontweight='bold')
+        ax.grid(axis='y', alpha=0.3)
+
+        for bar, count in zip(bars, counts):
+            ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.1,
+                    str(count), ha='center', va='bottom', fontsize=10)
+
+        plt.tight_layout()
+        if output_file:
+            plt.savefig(output_file, dpi=300, bbox_inches='tight')
+            print(f"  📊 Plot saved: {output_file}")
+        else:
+            plt.show()
+        plt.close()
+
+    # ------------------------------------------------------------------
+    def plot_hallucinations_per_session(self, output_file: str = None):
+        if not _MATPLOTLIB:
+            print("  ⚠️  matplotlib not installed – skipping plot.")
+            return
+
+        total_sessions = self.metadata.get('total_sessions', 0)
+        if total_sessions == 0:
+            print("  ⚠️  total_sessions is 0 – skipping hallucinations-per-session plot.")
+            return
+
+        # session 필드로 직접 카운팅
+        hall_per_session = [0] * (total_sessions + 1)
+        for h in self.hallucinations:
+            s = h.get('session', 0)
+            if 1 <= s <= total_sessions:
+                hall_per_session[s] += 1
+
+        sessions = list(range(1, total_sessions + 1))
+        counts = hall_per_session[1:]
+
+        fig, ax = plt.subplots(figsize=(12, 6))
+        ax.bar(sessions, counts, color='coral', alpha=0.7)
+        ax.set_xlabel('Session Number', fontsize=12)
+        ax.set_ylabel('Hallucinations Detected', fontsize=12)
+        ax.set_title('Hallucination Count per Session', fontsize=14, fontweight='bold')
+        ax.set_xticks(sessions)
+        ax.grid(axis='y', alpha=0.3)
+        plt.tight_layout()
+
+        if output_file:
+            plt.savefig(output_file, dpi=300, bbox_inches='tight')
+            print(f"  📊 Plot saved: {output_file}")
+        else:
+            plt.show()
+        plt.close()
+
+    # ------------------------------------------------------------------
+    # LaTeX
+    def generate_latex_table(self, rows: List[Dict], caption: str = "", label: str = "") -> str:
+        if not rows:
+            return ""
+        columns = list(rows[0].keys())
+        latex = "\\begin{table}[h]\n\\centering\n"
+        if caption:
+            latex += f"\\caption{{{caption}}}\n"
+        if label:
+            latex += f"\\label{{{label}}}\n"
+        latex += "\\begin{tabular}{" + "l" * len(columns) + "}\n\\hline\n"
+        latex += " & ".join(columns) + " \\\\\n\\hline\n"
+        for row in rows:
+            latex += " & ".join(str(row.get(c, '')) for c in columns) + " \\\\\n"
+        latex += "\\hline\n\\end{tabular}\n\\end{table}\n"
+        return latex
+
+    # ------------------------------------------------------------------
+    # Full Report
+    def generate_full_report(self, output_dir: str = "."):
+        output_path = Path(output_dir)
+        output_path.mkdir(exist_ok=True)
+
+        print("\n" + "=" * 70)
+        print("  PROVEN FACT SIMULATION ANALYSIS REPORT  v1.4.0-ABSOLUTE-FINAL")
+        print("=" * 70 + "\n")
+
+        # ---- Summary ----
+        print("SUMMARY STATISTICS")
         print("-" * 70)
+        summary = self.generate_summary_statistics()
         for key, value in summary.items():
-            print(f"{key:.<50} {value}")
-        
-        with open(f"{output_dir}/summary.txt", 'w') as f:
-            for key, value in summary.items():
-                f.write(f"{key}: {value}\n")
-        
-        # Session table
-        df_sessions = self.generate_session_table()
-        df_sessions.to_csv(f"{output_dir}/session_table.csv", index=False)
-        print(f"\n✓ Session table saved to: {output_dir}/session_table.csv")
-        
-        # Stage analysis
-        df_stages = self.analyze_evidence_stages()
-        if len(df_stages) > 0:
-            df_stages.to_csv(f"{output_dir}/stage_analysis.csv", index=False)
-            print(f"✓ Stage analysis saved to: {output_dir}/stage_analysis.csv")
-        
-        # Residual hallucinations
-        df_residual = self.analyze_residual_hallucinations()
-        df_residual.to_csv(f"{output_dir}/residual_hallucinations.csv", index=False)
-        print(f"✓ Residual hallucinations saved to: {output_dir}/residual_hallucinations.csv")
-        
-        # Reasoning paths
-        reasoning_paths = self.extract_reasoning_paths()
-        with open(f"{output_dir}/reasoning_paths.json", 'w') as f:
-            json.dump(reasoning_paths, f, indent=2, ensure_ascii=False)
-        print(f"✓ Reasoning paths saved to: {output_dir}/reasoning_paths.json")
-        print(f"  Total A-B-C patterns found: {len(reasoning_paths)}")
-        
-        # Visualizations
-        self.plot_hallucination_trend(f"{output_dir}/hallucination_trend.png")
-        self.plot_stage_comparison(f"{output_dir}/stage_comparison.png")
-        
-        # LaTeX table
-        self.generate_latex_table(f"{output_dir}/results_table.tex")
-        
-        # Final audit details
-        if self.final_audit:
-            print("\nFINAL AUDIT RESULTS:")
-            print("-" * 70)
-            print(f"Data Quality: {self.final_audit.get('data_quality', 'N/A')}")
-            print(f"Residual Hallucinations: {len(self.final_audit.get('residual_hallucinations', []))}")
-            
-            if self.final_audit.get('recommendations'):
-                print("\nRecommendations:")
-                for rec in self.final_audit['recommendations']:
-                    print(f"  • {rec}")
-        
-        print(f"\n{'='*70}")
-        print(f"Full report generated in: {output_dir}/")
-        print(f"{'='*70}\n")
+            print(f"  {key:.<44} {value}")
+
+        # ---- Session table ----
+        print("\n\nSESSION-BY-SESSION PERFORMANCE")
+        print("-" * 70)
+        session_table = self.generate_session_table()
+        if _PANDAS:
+            print(pd.DataFrame(session_table).to_string(index=False))
+        else:
+            # fallback: plain text
+            if session_table:
+                headers = list(session_table[0].keys())
+                print("  " + "  ".join(f"{h:>14}" for h in headers))
+                for row in session_table:
+                    print("  " + "  ".join(f"{str(row[h]):>14}" for h in headers))
+
+        # ---- Severity ----
+        print("\n\nHALLUCINATION SEVERITY DISTRIBUTION")
+        print("-" * 70)
+        severity_data = self.analyze_hallucinations_by_severity()
+        for item in severity_data:
+            bar = "█" * item['Count']
+            print(f"  {item['Severity']:10} {item['Count']:3}  {bar}")
+
+        # ---- Referee analysis (BUG-C 수정) ----
+        print("\n\nREFEREE SYSTEM ANALYSIS")
+        print("-" * 70)
+        ref_analysis = self.generate_referee_analysis()
+        for key, value in ref_analysis.items():
+            print(f"  {key:.<44} {value}")
+
+        # ---- Redundancy (NEW) ----
+        print("\n\nREDUNDANCY ANALYSIS")
+        print("-" * 70)
+        redundancy = self.analyze_redundancy()
+        for key, value in redundancy.items():
+            print(f"  {key:.<44} {value}")
+
+        # ---- Confirmed Logic (NEW) ----
+        print("\n\nCONFIRMED LOGIC NODES")
+        print("-" * 70)
+        if self.confirmed_logic:
+            for i, node in enumerate(self.confirmed_logic, 1):
+                print(f"  {i}. [Session {node.get('session', '?')}] "
+                      f"{node.get('conclusion', 'N/A')[:80]}")
+        else:
+            print("  (none)")
+
+        # ---- Plots ----
+        print("\n\nGENERATING VISUALIZATIONS…")
+        print("-" * 70)
+        self.plot_severity_distribution(
+            output_file=str(output_path / "severity_distribution.png")
+        )
+        self.plot_hallucinations_per_session(
+            output_file=str(output_path / "hallucinations_per_session.png")
+        )
+
+        # ---- LaTeX ----
+        print("\n\nLATEX TABLE GENERATION")
+        print("-" * 70)
+        latex_output = output_path / "tables.tex"
+        with open(latex_output, 'w', encoding='utf-8') as f:
+            f.write("% Session Performance Table\n")
+            f.write(self.generate_latex_table(
+                session_table,
+                caption="Session-by-Session Performance",
+                label="tab:sessions"
+            ))
+            f.write("\n\n% Severity Distribution Table\n")
+            f.write(self.generate_latex_table(
+                severity_data,
+                caption="Hallucination Severity Distribution",
+                label="tab:severity"
+            ))
+            f.write("\n\n% Redundancy Analysis Table\n")
+            f.write(self.generate_latex_table(
+                [redundancy],
+                caption="Redundancy Analysis",
+                label="tab:redundancy"
+            ))
+        print(f"  📄 LaTeX tables saved: {latex_output}")
+
+        # ---- JSON summary ----
+        summary_file = output_path / "analysis_summary.json"
+        with open(summary_file, 'w', encoding='utf-8') as f:
+            json.dump({
+                'summary_statistics': summary,
+                'referee_analysis': ref_analysis,
+                'redundancy_analysis': redundancy,
+                'session_table': session_table,
+                'severity_distribution': severity_data,
+                'confirmed_logic_count': len(self.confirmed_logic),
+            }, f, indent=2, ensure_ascii=False)
+        print(f"  📄 Summary JSON saved: {summary_file}")
+
+        print("\n" + "=" * 70)
+        print("  ✅ ANALYSIS COMPLETE")
+        print("=" * 70 + "\n")
 
 
-def compare_multiple_simulations(result_files: List[str], output_file: str = 'comparison.png'):
-    """Compare results from multiple simulations"""
-    plt.figure(figsize=(14, 7))
-    
-    for result_file in result_files:
-        with open(result_file, 'r') as f:
-            data = json.load(f)
-        
-        sessions = [s['session_number'] for s in data['sessions']]
-        rates = [s.get('hallucination_rate', 0) * 100 for s in data['sessions']]
-        
-        label = Path(result_file).stem.replace('_', ' ').title()
-        plt.plot(sessions, rates, marker='o', label=label, linewidth=2, markersize=5, alpha=0.8)
-    
-    plt.axhline(y=1.0, color='r', linestyle='--', linewidth=1.5, label='1% threshold', alpha=0.5)
-    plt.axhline(y=0.0, color='g', linestyle='--', linewidth=1.5, label='0% (ideal)', alpha=0.5)
-    plt.xlabel('Session Number', fontsize=13, fontweight='bold')
-    plt.ylabel('Hallucination Rate (%)', fontsize=13, fontweight='bold')
-    plt.title('Comparison of Multiple Simulations', fontsize=15, fontweight='bold')
-    plt.legend(fontsize=10, loc='best')
-    plt.grid(True, alpha=0.3, linestyle=':')
-    plt.tight_layout()
-    plt.savefig(output_file, dpi=300, bbox_inches='tight')
-    print(f"Comparison plot saved to: {output_file}")
-    plt.close()
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+def main():
+    parser = argparse.ArgumentParser(
+        description='Analyze Proven Fact-Based Algorithm Results v1.4.0-ABSOLUTE-FINAL',
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python analyze_proven_fact.py results.json
+  python analyze_proven_fact.py results.json --output analysis_output
+  python analyze_proven_fact.py results.json --summary-only
+        """
+    )
+    parser.add_argument('results_file', type=str,
+                        help='Path to simulation results JSON file')
+    parser.add_argument('--output', type=str, default='.',
+                        help='Output directory (default: current directory)')
+    parser.add_argument('--summary-only', action='store_true',
+                        help='Print summary only – no files generated')
+
+    args = parser.parse_args()
+
+    if not Path(args.results_file).exists():
+        print(f"  ❌ File not found: {args.results_file}")
+        return 1
+
+    try:
+        analyzer = ProvenFactAnalyzer(args.results_file)
+
+        if args.summary_only:
+            print("\n" + "=" * 70)
+            print("  SUMMARY STATISTICS")
+            print("=" * 70 + "\n")
+            for key, value in analyzer.generate_summary_statistics().items():
+                print(f"  {key:.<44} {value}")
+            print()
+        else:
+            analyzer.generate_full_report(output_dir=args.output)
+
+        return 0
+
+    except Exception as e:
+        print(f"\n  ❌ ERROR: {e}")
+        import traceback
+        traceback.print_exc()
+        return 1
 
 
 if __name__ == "__main__":
-    import sys
-    
-    if len(sys.argv) < 2:
-        print("Usage: python analyze_proven_fact.py <results_file.json>")
-        print("Example: python analyze_proven_fact.py earth_rotation_results.json")
-        sys.exit(1)
-    
-    results_file = sys.argv[1]
-    
-    analyzer = ProvenFactAnalyzer(results_file)
-    analyzer.generate_full_report()
+    sys.exit(main())
