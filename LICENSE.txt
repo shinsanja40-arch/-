@@ -1,5 +1,7 @@
 BY-NC (Personal use allowed. Commercial use prohibited. Attribution required.)
 Copyright (c) 2026 Cheongwon Choi
+ccw1914@naver.com
+
 
 Permission is hereby granted, free of charge for personal and non-commercial use only, 
 to any person obtaining a copy of this software and associated documentation files 
